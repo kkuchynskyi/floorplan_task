@@ -176,18 +176,18 @@ def main():
     output_dir = Path("data/output")
 
     for image_path in sorted(input_dir.glob("*.webp")):
-        # 1. Load image and convert to HSV
+        ### 1. Load image and convert to HSV
         rgb = np.array(Image.open(image_path).convert("RGB"))
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
         sat = hsv[:, :, 1]
         val = hsv[:, :, 2]
 
-        # 2. Detect foreground
-        foreground = ((val < 247) | (sat > 10)).astype(np.uint8)
-        foreground = cv2.morphologyEx(foreground, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        ### 2. Isolate the drawing from the white background
+        # The constants were chosen empirically
+        drawing_mask = ((val < 247) | (sat > 10)).astype(np.uint8)
 
-        # 3. Find and fill the floorplan region
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, 8)
+        ### 3. Find and fill the floorplan region
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(drawing_mask, 8)
         floorplan = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA]))
         floorplan = cv2.morphologyEx(
             floorplan.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (23, 23))
@@ -250,7 +250,7 @@ def main():
             image_output_dir / "pipeline.png",
             [
                 ("1. Load image and convert to HSV", rgb),
-                ("2. Detect foreground", foreground),
+                ("2. Isolate the drawing from the white background", drawing_mask),
                 ("3. Find and fill floorplan", floorplan),
                 ("4. Extract outer boundary", outer),
                 ("5. Detect wall candidates", wall_candidates),
