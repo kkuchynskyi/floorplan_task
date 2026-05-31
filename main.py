@@ -40,24 +40,6 @@ def save_pipeline_image(output_path, steps, panel_size=(400, 400), columns=2):
     pipeline.save(output_path)
 
 
-def skeletonize(mask):
-    image = mask.astype(np.uint8) * 255
-    return cv2.ximgproc.thinning(image) > 0
-
-
-def prune_endpoints(mask, iterations=50):
-    pruned = mask.astype(np.uint8).copy()
-    kernel = np.ones((3, 3), dtype=np.uint8)
-    kernel[1, 1] = 0
-
-    for _ in range(iterations):
-        neighbors = cv2.filter2D(pruned, -1, kernel)
-        endpoints = (pruned == 1) & (neighbors == 1)
-        pruned[endpoints] = 0
-
-    return pruned > 0
-
-
 def label_regions(floorplan, wall_lines):
     wall_barriers = cv2.dilate(wall_lines.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))).astype(
         bool
@@ -187,60 +169,45 @@ def main():
         drawing_mask = ((val < 247) | (sat > 10)).astype(np.uint8)
 
         ### 3. Find and fill the floorplan region
-        n, labels, stats, _ = cv2.connectedComponentsWithStats(drawing_mask, 8)
-        floorplan = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        floorplan = cv2.morphologyEx(
-            floorplan.astype(np.uint8), cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (23, 23))
-        ).astype(bool)
-        padded = np.pad(floorplan.astype(np.uint8), 1)
-        flood = padded.copy()
-        cv2.floodFill(flood, None, (0, 0), 1)
-        floorplan = floorplan | (flood[1:-1, 1:-1] == 0)
+        # Connected components split the drawing into separate blobs.
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(drawing_mask.astype(np.uint8), 8)
+        # We keep the largest blob because it is the main floorplan footprint.
+        largest_component = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        floorplan = fill_holes(largest_component)
 
-        # 4. Extract outer floorplan boundary
+        ### 4. Extract outer floorplan boundary
+        # Erosion shrinks the floorplan
         outer = floorplan & ~cv2.erode(
             floorplan.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (19, 19))
         ).astype(bool)
 
-        # 5. Detect wall candidates
-        wall_candidates = ((val > 200) & (sat < 48) & floorplan).astype(np.uint8)
-        wall_candidates = cv2.morphologyEx(
-            wall_candidates, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        )
+        ### 5. Build final border mask
+        # Use light interior wall pixels plus the extracted outer boundary.
+        # The constants were chosen empirically
+        borders = (((val > 200) & (sat < 48) & floorplan) | outer) & floorplan
 
-        # Use wall candidates directly
-        walls = wall_candidates.astype(bool)
-
-        # 6. Build final border mask
-        borders = (walls | outer).astype(np.uint8)
-        borders = cv2.morphologyEx(borders, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
-        borders = (borders > 0) & floorplan
-
-        # 7. Extract largest border component
+        # 6. Extract largest border component
         n, labels, stats, _ = cv2.connectedComponentsWithStats(borders.astype(np.uint8), 8)
         border_component = np.zeros(borders.shape, dtype=bool)
         if n > 1:
             border_component = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA]))
 
-        # 8. Skeletonize inner and outer walls
-        line_mask = skeletonize(border_component)
+        # 7. Skeletonize inner and outer walls
+        line_mask = cv2.ximgproc.thinning(border_component.astype(np.uint8) * 255) > 0
 
-        # 9. Prune disconnected endpoints
-        pruned_line_mask = prune_endpoints(line_mask, iterations=50)
+        # 8. Color inner room regions
+        room_labels = label_regions(floorplan, line_mask)
+        room_regions = color_regions(room_labels, line_mask)
 
-        # 10. Color inner room regions
-        room_labels = label_regions(floorplan, pruned_line_mask)
-        room_regions = color_regions(room_labels, pruned_line_mask)
-
-        # 11. Close room gaps
+        # 9. Close room gaps
         closed_room_labels = close_region_gaps(room_labels, kernel_size=9)
         closed_room_regions = color_regions(closed_room_labels)
 
-        # 12. Merge tiny room regions
+        # 10. Merge tiny room regions
         merged_room_labels = merge_small_regions(closed_room_labels, min_area=1150)
         merged_room_regions = color_regions(merged_room_labels)
 
-        # 13. Overlay
+        # 11. Overlay
         overlay = overlay_regions(rgb, merged_room_labels)
 
         # Save border mask
@@ -253,20 +220,18 @@ def main():
                 ("2. Isolate the drawing from the white background", drawing_mask),
                 ("3. Find and fill floorplan", floorplan),
                 ("4. Extract outer boundary", outer),
-                ("5. Detect wall candidates", wall_candidates),
-                ("6. Build final border mask", borders),
-                ("7. Extract largest border component", border_component),
-                ("8. Skeletonize walls", line_mask),
-                ("9. Prune endpoints", pruned_line_mask),
-                ("10. Color inner regions", room_regions),
-                ("11. Close room gaps", closed_room_regions),
-                ("12. Merge tiny regions", merged_room_regions),
-                ("13. Overlay", overlay),
+                ("5. Build final border mask", borders),
+                ("6. Extract largest border component", border_component),
+                ("7. Skeletonize walls", line_mask),
+                ("8. Color inner regions", room_regions),
+                ("9. Close room gaps", closed_room_regions),
+                ("10. Merge tiny regions", merged_room_regions),
+                ("11. Overlay", overlay),
             ],
             columns=3,
         )
         Image.fromarray(border_component.astype(np.uint8) * 255).save(image_output_dir / "border_mask.png")
-        Image.fromarray(pruned_line_mask.astype(np.uint8) * 255).save(image_output_dir / "border_lines.png")
+        Image.fromarray(line_mask.astype(np.uint8) * 255).save(image_output_dir / "border_lines.png")
         print(f"wrote {image_output_dir / 'border_mask.png'}")
 
 
