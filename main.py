@@ -40,18 +40,19 @@ def save_pipeline_image(output_path, steps, panel_size=(400, 400), columns=2):
     pipeline.save(output_path)
 
 
-def label_regions(floorplan, wall_lines):
-    wall_barriers = cv2.dilate(wall_lines.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))).astype(
-        bool
-    )
-    room_space = floorplan & ~wall_barriers
+def label_rooms(floorplan, wall_lines):
+    wall_mask = cv2.dilate(wall_lines.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))).astype(bool)
+
+    room_space = floorplan & ~wall_mask
     _, labels = cv2.connectedComponents(room_space.astype(np.uint8), 8)
-    floorplan_border = floorplan & ~cv2.erode(
+
+    outer_edge = floorplan & ~cv2.erode(
         floorplan.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
     ).astype(bool)
-    border_region_ids = np.unique(labels[floorplan_border])
-    for region_id in border_region_ids:
-        labels[labels == region_id] = 0
+
+    edge_labels = np.unique(labels[outer_edge])
+    for label in edge_labels:
+        labels[labels == label] = 0
 
     return labels
 
@@ -61,10 +62,6 @@ def color_regions(labels, wall_lines=None):
     colored = np.zeros((*labels.shape, 3), dtype=np.uint8)
     for label in range(1, labels.max() + 1):
         colored[labels == label] = rng.integers(40, 256, size=3, dtype=np.uint8)
-
-    if wall_lines is not None:
-        colored[wall_lines] = (255, 255, 255)
-
     return colored
 
 
@@ -196,19 +193,19 @@ def main():
         line_mask = cv2.ximgproc.thinning(border_component.astype(np.uint8) * 255) > 0
 
         # 8. Color inner room regions
-        room_labels = label_regions(floorplan, line_mask)
+        room_labels = label_rooms(floorplan, line_mask)
         room_regions = color_regions(room_labels, line_mask)
 
-        # 9. Close room gaps
-        closed_room_labels = close_region_gaps(room_labels, kernel_size=9)
-        closed_room_regions = color_regions(closed_room_labels)
-
-        # 10. Merge tiny room regions
-        merged_room_labels = merge_small_regions(closed_room_labels, min_area=1150)
+        # 9. Merge tiny room regions
+        merged_room_labels = merge_small_regions(room_labels, min_area=2600)
         merged_room_regions = color_regions(merged_room_labels)
 
+        # 10. Close room gaps
+        closed_room_labels = close_region_gaps(merged_room_labels, kernel_size=9)
+        closed_room_regions = color_regions(closed_room_labels)
+
         # 11. Overlay
-        overlay = overlay_regions(rgb, merged_room_labels)
+        overlay = overlay_regions(rgb, closed_room_labels)
 
         # Save border mask
         image_output_dir = output_dir / image_path.stem
@@ -224,8 +221,8 @@ def main():
                 ("6. Extract largest border component", border_component),
                 ("7. Skeletonize walls", line_mask),
                 ("8. Color inner regions", room_regions),
-                ("9. Close room gaps", closed_room_regions),
-                ("10. Merge tiny regions", merged_room_regions),
+                ("9. Merge tiny regions", merged_room_regions),
+                ("10. Close room gaps", closed_room_regions),
                 ("11. Overlay", overlay),
             ],
             columns=3,
