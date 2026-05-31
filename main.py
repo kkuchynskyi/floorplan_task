@@ -1,34 +1,11 @@
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
-
-def pipeline_panel(array, label, size=(400, 400), padding=8):
-    if array.dtype == bool or (array.ndim == 2 and array.max() <= 1):
-        array = array.astype(np.uint8) * 255
-
-    image = Image.fromarray(array.astype(np.uint8))
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    image = image.resize(size)
-
-    draw = ImageDraw.Draw(image)
-    text_bbox = draw.textbbox((0, 0), label)
-    text_position = (padding, size[1] - (text_bbox[3] - text_bbox[1]) - padding)
-    draw.text(text_position, label, fill=(0, 255, 0), stroke_width=2, stroke_fill=(0, 0, 0))
-    return image
-
-
-def save_pipeline_image(output_path, steps, panel_size=(400, 400), columns=2):
-    rows = int(np.ceil(len(steps) / columns))
-    pipeline = Image.new("RGB", (panel_size[0] * columns, panel_size[1] * rows), "white")
-    for index, (label, panel) in enumerate(steps):
-        x = (index % columns) * panel_size[0]
-        y = (index // columns) * panel_size[1]
-        pipeline.paste(pipeline_panel(panel, label, panel_size), (x, y))
-    pipeline.save(output_path)
+from utils import describe_rooms, draw_room_area_labels, save_pipeline_image
 
 
 def label_rooms(floorplan, wall_lines):
@@ -153,31 +130,33 @@ def main():
         # The constants were chosen empirically
         borders = (((val > 200) & (sat < 48) & floorplan) | outer) & floorplan
 
-        # 6. Extract largest border component
+        ### 6. Extract largest border component
         n, labels, stats, _ = cv2.connectedComponentsWithStats(borders.astype(np.uint8), 8)
         border_component = np.zeros(borders.shape, dtype=bool)
         if n > 1:
             border_component = labels == (1 + np.argmax(stats[1:, cv2.CC_STAT_AREA]))
 
-        # 7. Skeletonize inner and outer walls
+        ### 7. Skeletonize inner and outer walls
         line_mask = cv2.ximgproc.thinning(border_component.astype(np.uint8) * 255) > 0
 
-        # 8. Color inner room regions
+        ### 8. Color inner room regions
         room_labels = label_rooms(floorplan, line_mask)
         room_regions = color_regions(room_labels, line_mask)
 
-        # 9. Merge tiny room regions
+        ### 9. Merge tiny room regions
         merged_room_labels = merge_small_regions(room_labels, min_area=2600)
         merged_room_regions = color_regions(merged_room_labels)
 
-        # 10. Close room gaps
+        ### 10. Close room gaps
         closed_room_labels = close_region_gaps(merged_room_labels, kernel_size=9)
         closed_room_regions = color_regions(closed_room_labels)
 
-        # 11. Overlay
+        ### 11. Overlay
         overlay = overlay_regions(rgb, closed_room_labels)
+        rooms = describe_rooms(closed_room_labels)
+        overlay = draw_room_area_labels(overlay, rooms)
 
-        # Save border mask
+        # Save final outputs
         image_output_dir = output_dir / image_path.stem
         image_output_dir.mkdir(parents=True, exist_ok=True)
         save_pipeline_image(
@@ -197,9 +176,20 @@ def main():
             ],
             columns=3,
         )
-        Image.fromarray(border_component.astype(np.uint8) * 255).save(image_output_dir / "border_mask.png")
-        Image.fromarray(line_mask.astype(np.uint8) * 255).save(image_output_dir / "border_lines.png")
-        print(f"wrote {image_output_dir / 'border_mask.png'}")
+        Image.fromarray(overlay).save(image_output_dir / "overlay.png")
+        with (image_output_dir / "rooms.json").open("w") as file:
+            json.dump(
+                {
+                    "source": str(image_path),
+                    "image_width": rgb.shape[1],
+                    "image_height": rgb.shape[0],
+                    "room_count": len(rooms),
+                    "rooms": rooms,
+                },
+                file,
+                indent=2,
+            )
+        print(f"wrote {image_output_dir}")
 
 
 if __name__ == "__main__":
