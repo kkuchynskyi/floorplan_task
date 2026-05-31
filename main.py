@@ -2,13 +2,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
-def pipeline_panel(array, label, size=(400, 400)):
-    if array.dtype == bool:
-        array = array.astype(np.uint8) * 255
-    elif array.ndim == 2 and array.max() <= 1:
+def pipeline_panel(array, label, size=(400, 400), padding=8):
+    if array.dtype == bool or (array.ndim == 2 and array.max() <= 1):
         array = array.astype(np.uint8) * 255
 
     image = Image.fromarray(array.astype(np.uint8))
@@ -16,18 +14,11 @@ def pipeline_panel(array, label, size=(400, 400)):
         image = image.convert("RGB")
     image = image.resize(size)
 
-    image = image.convert("RGBA")
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    font = ImageFont.truetype("Arial.ttf", 25)
-    padding = 8
-    text_bbox = draw.textbbox((0, 0), label, font=font)
+    draw = ImageDraw.Draw(image)
+    text_bbox = draw.textbbox((0, 0), label)
     text_position = (padding, size[1] - (text_bbox[3] - text_bbox[1]) - padding)
-    text_bbox = draw.textbbox(text_position, label, font=font)
-    background_bbox = (text_bbox[0] - padding, text_bbox[1] - padding, text_bbox[2] + padding, text_bbox[3] + padding)
-    draw.rectangle(background_bbox, fill=(0, 0, 0, 120))
-    draw.text(text_position, label, font=font, fill=(0, 255, 0))
-    return Image.alpha_composite(image, overlay).convert("RGB")
+    draw.text(text_position, label, fill=(0, 255, 0), stroke_width=2, stroke_fill=(0, 0, 0))
+    return image
 
 
 def save_pipeline_image(output_path, steps, panel_size=(400, 400), columns=2):
@@ -83,51 +74,31 @@ def fill_holes(mask):
     return mask | holes
 
 
-def close_region_gaps(labels, kernel_size=9, enclosed_area=2500):
+def close_region_gaps(labels, kernel_size=9):
     closed_labels = labels.copy()
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    region_ids, areas = np.unique(labels[labels > 0], return_counts=True)
-    region_ids = region_ids[np.argsort(areas)[::-1]]
 
+    # Close and fill each room separately so small gaps become part of the room.
+    region_ids = np.unique(labels[labels > 0])
     for region_id in region_ids:
-        region = (labels == region_id).astype(np.uint8)
-        closed = cv2.morphologyEx(region, cv2.MORPH_CLOSE, kernel).astype(bool)
+        region = labels == region_id
+        closed = cv2.morphologyEx(region.astype(np.uint8), cv2.MORPH_CLOSE, kernel).astype(bool)
         filled = fill_holes(closed)
-        closed_labels[(closed_labels == 0) & closed] = region_id
-        closed_labels[filled & (closed_labels != region_id)] = region_id
 
-    region_ids, areas = np.unique(closed_labels[closed_labels > 0], return_counts=True)
-    area_by_id = dict(zip(region_ids, areas))
-    neighbor_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
-
-    for region_id, area in zip(region_ids, areas):
-        if area >= enclosed_area:
-            continue
-
-        region = closed_labels == region_id
-        ring = cv2.dilate(region.astype(np.uint8), neighbor_kernel).astype(bool) & ~region
-        neighbor_ids, contact_counts = np.unique(closed_labels[ring & (closed_labels > 0)], return_counts=True)
-        if len(neighbor_ids) == 0:
-            continue
-
-        target_index = int(np.argmax(contact_counts))
-        target_id = neighbor_ids[target_index]
-        target_area = area_by_id.get(target_id, 0)
-        contact_ratio = contact_counts[target_index] / contact_counts.sum()
-        if target_area > area and contact_ratio >= 0.5:
-            closed_labels[region | (ring & (closed_labels == 0))] = target_id
+        # Only claim unlabeled pixels; do not overwrite another room.
+        closed_labels[(closed_labels == 0) & filled] = region_id
 
     return closed_labels
 
 
 def merge_small_regions(labels, min_area=50):
     merged = labels.copy()
+
+    # Split rooms into small regions that should be merged and large target regions.
     region_ids, areas = np.unique(labels[labels > 0], return_counts=True)
     area_by_id = dict(zip(region_ids, areas))
     large_ids = set(region_ids[areas >= min_area])
-
-    if not large_ids:
-        return merged
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
     for region_id, area in zip(region_ids, areas):
         if area >= min_area:
@@ -135,17 +106,16 @@ def merge_small_regions(labels, min_area=50):
 
         region_mask = labels == region_id
         search = region_mask.astype(np.uint8)
-        closest_large_id = None
-        while closest_large_id is None and np.any(search):
-            search = cv2.dilate(search, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+
+        # Grow the small region until it touches a large neighboring region.
+        touched_ids = set()
+        while not touched_ids:
+            search = cv2.dilate(search, kernel)
             touched_ids = set(np.unique(labels[search > 0])) & large_ids
-            if touched_ids:
-                closest_large_id = max(touched_ids, key=lambda label: area_by_id[label])
 
-        if closest_large_id is None:
-            closest_large_id = max(large_ids, key=lambda label: area_by_id[label])
-
-        merged[region_mask | ((search > 0) & (labels == 0))] = closest_large_id
+        # Merge into the largest touched neighbor.
+        target_id = max(touched_ids, key=lambda label: area_by_id[label])
+        merged[region_mask | ((search > 0) & (labels == 0))] = target_id
 
     return merged
 
