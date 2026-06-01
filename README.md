@@ -43,3 +43,10 @@ python main.py
 `overlay.png` shows the final rooms with relative area labels.
 
 `rooms.json` contains each room index, pixel area, relative area, center point, and polygon.
+
+## Possible next steps
+
+1. Extend the borders of the exterior rooms to fit the boundary from the step 4.
+2. Classify all skeleton lines into two classes: horizontal and vertical.
+3. Flatten the skeleton lines.
+4. Approximate the room polygon with smaller number of points. Make the rooms to be more rectangular.

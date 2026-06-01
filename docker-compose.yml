@@ -1,0 +1,8 @@
+services:
+  floorplan:
+    build:
+      context: .
+    image: floorplan-task:latest
+    volumes:
+      - ./data:/app/data
+    command: ["python", "main.py"]
